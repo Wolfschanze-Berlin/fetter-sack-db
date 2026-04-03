@@ -38,8 +38,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate compose.yml
-        run: docker compose config --quiet
+      - name: Validate compose.yml (both profiles)
+        run: |
+          docker compose --profile dev  config --quiet
+          docker compose --profile prod config --quiet
 
       - name: Lint Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
