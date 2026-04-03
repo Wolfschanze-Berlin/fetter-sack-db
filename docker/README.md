@@ -2,33 +2,37 @@
 
 ## PostgreSQL 17 Analytics Stack
 
-Custom PostgreSQL image combining **time-series**, **graph database**, and **columnar analytics** capabilities.
+Custom PostgreSQL image combining **partition management**, **graph database**, and **columnar analytics** capabilities.
 
 ### Features
 
 | Component | Version | Purpose |
 |-----------|---------|---------|
-| PostgreSQL | 17.7 | Base database system |
-| TimescaleDB | 2.25.0 | Time-series hypertables, compression, continuous aggregates |
-| Apache AGE | 1.6.0 | Graph queries via Cypher for fraud link detection |
-| pg_mooncake | 0.2.0 | Columnar analytics via DuckDB, Apache Iceberg export |
-| pg_duckdb | 1.0.0 | DuckDB integration (bundled with pg_mooncake) |
-| postgres_fdw | 1.1 | Foreign Data Wrapper for remote PostgreSQL connections |
+| PostgreSQL | 17 | Base database system |
+| pg_duckdb | 1.1.x | Embedded DuckDB OLAP engine (DuckDB 1.4.3) |
+| pg_partman | 5.4.0 | Automatic time/id-based partition management |
+| Apache AGE | 1.6.0 | Graph queries via Cypher |
 | pgmq | 1.9.0 | Lightweight message queue (like AWS SQS on Postgres) |
+| pg_cron | 1.6.7 | Job scheduler (cron syntax from SQL) |
+| pg_net | 0.20.2 | HTTP client from SQL |
+| pg_graphql | 1.5.12 | GraphQL API |
+| pgvector | 0.8.1 | Vector similarity search |
+| system_stats | 3.2 | OS-level system metrics from SQL |
+| PostGIS | 3 | Geospatial |
+| RUM | - | Full-text search index |
 
 ### Build
 
 ```bash
-# From project root
+# From project root (BuildKit required)
 docker compose build postgres
 
 # Or directly
-docker build -t athena-mpc-pg:latest -f docker/Dockerfile.pg-age-timescale docker/
+DOCKER_BUILDKIT=1 docker build -t fetter-sack-db:latest \
+  -f docker/Dockerfile.pg-analytics-stack docker/
 ```
 
-**Build time**: ~5 minutes (includes compilation of Apache AGE from source)
-
-**Image size**: ~2GB
+**Build time**: ~15 min cold, ~3-5 min warm (BuildKit parallel stages + ccache)
 
 ### Run
 
@@ -39,13 +43,13 @@ docker compose up -d postgres
 # Or standalone
 docker run -d \
   -p 46432:5432 \
-  -e POSTGRES_DB=athena-mpc \
+  -e POSTGRES_DB=athena-mcp \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
-  -v pg_data:/var/lib/postgresql/data \
-  --shm-size=512mb \
-  --name athena-mcp-pg \
-  athena-mpc-pg:latest
+  -v pg_data:/home/postgres/pgdata \
+  --shm-size=20gb \
+  --name fetter-sack-db \
+  fetter-sack-db:latest
 ```
 
 ### Validation
@@ -60,72 +64,92 @@ Or manually:
 
 ```bash
 # Check extensions are available
-docker exec athena-mcp-pg psql -U postgres -d athena-mpc -c \
+docker exec fetter-sack-db psql -U postgres -d athena-mcp -c \
   "SELECT name, default_version FROM pg_available_extensions
-   WHERE name IN ('timescaledb', 'age', 'pg_mooncake', 'pg_duckdb');"
-
-# Create all extensions (in order!)
-docker exec athena-mcp-pg psql -U postgres -d athena-mpc -c \
-  "CREATE EXTENSION IF NOT EXISTS timescaledb;
-   CREATE EXTENSION IF NOT EXISTS age;
-   CREATE EXTENSION IF NOT EXISTS pg_mooncake CASCADE;"
+   WHERE name IN ('pg_partman', 'age', 'pg_duckdb', 'pgmq', 'pg_cron',
+                  'pg_net', 'pg_graphql', 'vector', 'system_stats');"
 ```
 
 ### Extension Installation Order
 
-**IMPORTANT**: Extensions must be installed in this order to avoid conflicts:
-
 ```sql
--- 1. TimescaleDB first (claims time_bucket function)
-CREATE EXTENSION IF NOT EXISTS timescaledb;
+-- 1. pg_partman (partition management with BGW)
+CREATE SCHEMA IF NOT EXISTS partman;
+CREATE EXTENSION IF NOT EXISTS pg_partman SCHEMA partman;
 
--- 2. Apache AGE second
+-- 2. Apache AGE (graph database)
 CREATE EXTENSION IF NOT EXISTS age;
 LOAD 'age';
 SET search_path = ag_catalog, public;
 
--- 3. pg_mooncake last (auto-installs pg_duckdb)
-CREATE EXTENSION IF NOT EXISTS pg_mooncake CASCADE;
--- Note: pg_mooncake will use duckdb.time_bucket instead
+-- 3. pg_duckdb (embedded OLAP)
+CREATE EXTENSION IF NOT EXISTS pg_duckdb;
 
--- 4. pgmq for message queues
+-- 4. pgmq (message queues)
 CREATE EXTENSION IF NOT EXISTS pgmq;
+
+-- 5. pg_cron (job scheduler)
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+-- 6. pg_net (HTTP client)
+CREATE EXTENSION IF NOT EXISTS pg_net;
+
+-- 7. pg_graphql (GraphQL API)
+CREATE EXTENSION IF NOT EXISTS pg_graphql;
+
+-- 8. pgvector (vector search)
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- 9. system_stats (OS metrics)
+CREATE EXTENSION IF NOT EXISTS system_stats;
 ```
 
 ### Usage Examples
 
-#### TimescaleDB: Time-Series Cache
+#### pg_partman: Time-Series Partition Management
 
 ```sql
--- Create partitioned cache table
-CREATE TABLE athena_daily_metrics (
+-- Setup
+CREATE SCHEMA IF NOT EXISTS partman;
+CREATE EXTENSION IF NOT EXISTS pg_partman SCHEMA partman;
+
+-- Create partitioned table
+CREATE TABLE daily_metrics (
+    id BIGINT GENERATED ALWAYS AS IDENTITY,
     time TIMESTAMPTZ NOT NULL,
     membercode TEXT,
     stake_amount DECIMAL(18,4),
     winlost_amount DECIMAL(18,4)
+) PARTITION BY RANGE (time);
+
+-- Let pg_partman manage daily partitions (pre-create 7 days ahead)
+SELECT partman.create_parent(
+    p_parent_table := 'public.daily_metrics',
+    p_control := 'time',
+    p_interval := '1 day',
+    p_premake := 7
 );
 
--- Convert to hypertable (partitions by time)
-SELECT create_hypertable('athena_daily_metrics', 'time');
+-- Set retention policy (drop partitions older than 90 days)
+UPDATE partman.part_config
+SET retention = '90 days',
+    retention_keep_table = false
+WHERE parent_table = 'public.daily_metrics';
 
--- Enable compression
-ALTER TABLE athena_daily_metrics SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = 'membercode'
-);
+-- Run maintenance manually (BGW does this automatically)
+SELECT partman.run_maintenance();
 
--- Auto-compress data older than 1 day
-SELECT add_compression_policy('athena_daily_metrics', INTERVAL '1 day');
+-- Check partition info
+SELECT * FROM partman.show_partitions('public.daily_metrics');
 ```
 
-#### Apache AGE: Fraud Link Detection
+#### Apache AGE: Graph Queries
 
 ```sql
--- Load AGE extension
 LOAD 'age';
 SET search_path = ag_catalog, public;
 
--- Create fraud investigation graph
+-- Create graph
 SELECT create_graph('fraud_network');
 
 -- Create member nodes with shared IP relationships
@@ -142,188 +166,76 @@ SELECT * FROM cypher('fraud_network', $$
 $$) as (member1 agtype, member2 agtype, shared_ip agtype);
 ```
 
-#### pg_mooncake: Columnar Analytics
-
-```sql
--- Create columnstore table (uses DuckDB engine for queries)
-CREATE TABLE analytics_events (
-    event_id BIGINT,
-    member_code TEXT,
-    event_type TEXT,
-    created_at TIMESTAMPTZ,
-    payload JSONB
-) USING mooncake;
-
--- Note: For data operations, pg_mooncake requires Iceberg storage
--- Configure with S3/MinIO for production use
-
--- Fast analytical queries (powered by DuckDB)
-SELECT
-    member_code,
-    COUNT(*) as event_count,
-    COUNT(DISTINCT event_type) as unique_events
-FROM analytics_events
-WHERE created_at >= NOW() - INTERVAL '7 days'
-GROUP BY member_code
-ORDER BY event_count DESC
-LIMIT 100;
-
--- Use DuckDB's time_bucket if TimescaleDB is installed
-SELECT
-    duckdb.time_bucket('1 hour', created_at) as hour,
-    COUNT(*) as events
-FROM analytics_events
-GROUP BY 1
-ORDER BY 1;
-```
-
-#### postgres_fdw: Remote PostgreSQL Access
-
-```sql
--- Create FDW extension
-CREATE EXTENSION IF NOT EXISTS postgres_fdw;
-
--- Define connection to remote PostgreSQL server
-CREATE SERVER remote_warehouse
-    FOREIGN DATA WRAPPER postgres_fdw
-    OPTIONS (host 'warehouse.example.com', port '5432', dbname 'analytics');
-
--- Map local user to remote credentials
-CREATE USER MAPPING FOR postgres
-    SERVER remote_warehouse
-    OPTIONS (user 'readonly_user', password 'secret');
-
--- Import a specific table from remote server
-CREATE FOREIGN TABLE remote_daily_metrics (
-    time TIMESTAMPTZ,
-    membercode TEXT,
-    stake_amount DECIMAL(18,4)
-)
-SERVER remote_warehouse
-OPTIONS (schema_name 'public', table_name 'daily_metrics');
-
--- Or import entire schema
-IMPORT FOREIGN SCHEMA public
-    LIMIT TO (daily_metrics, member_profiles)
-    FROM SERVER remote_warehouse
-    INTO local_schema;
-
--- Query remote data as if it's local
-SELECT membercode, SUM(stake_amount)
-FROM remote_daily_metrics
-WHERE time >= NOW() - INTERVAL '7 days'
-GROUP BY membercode;
-```
-
 #### pgmq: Message Queue
 
 ```sql
--- Create extension
 CREATE EXTENSION IF NOT EXISTS pgmq;
 
--- Create a queue for investigation tasks
+-- Create a queue
 SELECT pgmq.create('investigation_tasks');
 
--- Send a message (returns message ID)
+-- Send a message
 SELECT pgmq.send(
     'investigation_tasks',
     '{"task": "investigate_member", "membercode": "ABC123", "priority": "high"}'
 );
 
--- Read messages (visibility timeout 60 seconds, batch size 5)
+-- Read messages (visibility timeout 60s, batch 5)
 SELECT * FROM pgmq.read('investigation_tasks', 60, 5);
 
--- Archive a processed message
+-- Archive processed message
 SELECT pgmq.archive('investigation_tasks', 1);
-
--- Delete a message permanently
-SELECT pgmq.delete('investigation_tasks', 1);
-
--- Create a FIFO queue (strict ordering)
-SELECT pgmq.create('fifo_queue', is_fifo => true);
-
--- Send with delay (message visible after 30 seconds)
-SELECT pgmq.send('investigation_tasks', '{"delayed": true}', delay => 30);
-
--- Purge all messages from a queue
-SELECT pgmq.purge_queue('investigation_tasks');
-
--- List all queues
-SELECT * FROM pgmq.list_queues();
-
--- Drop a queue
-SELECT pgmq.drop_queue('investigation_tasks');
 ```
 
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                 PostgreSQL 17 Analytics Stack                    │
-│                      (athena-mcp-pg)                            │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌──────────────┐  ┌───────────────┐  ┌────────────────────┐   │
-│  │ TimescaleDB  │  │  Apache AGE   │  │   pg_mooncake      │   │
-│  │   2.25.0     │  │    1.6.0      │  │      0.2.0         │   │
-│  ├──────────────┤  ├───────────────┤  ├────────────────────┤   │
-│  │ Hypertables  │  │ Graph Queries │  │ Columnar Storage   │   │
-│  │ Compression  │  │ Cypher DSL    │  │ DuckDB Engine      │   │
-│  │ Continuous   │  │ Link Analysis │  │ Iceberg Export     │   │
-│  │ Aggregates   │  │               │  │ OLAP Analytics     │   │
-│  └──────────────┘  └───────────────┘  └────────────────────┘   │
-│         │                 │                    │                │
-│         └─────────────────┼────────────────────┘                │
-│                           ▼                                      │
-│                 PostgreSQL 17.7 Core                             │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        ▼                  ▼                  ▼
-  ┌───────────┐     ┌───────────┐     ┌────────────┐
-  │ Time-Series│     │  Fraud    │     │ Analytics  │
-  │  Cache    │     │  Graphs   │     │ Data Lake  │
-  └───────────┘     └───────────┘     └────────────┘
++-----------------------------------------------------------+
+|              PostgreSQL 17 Analytics Stack                  |
+|                    (fetter-sack-db)                          |
++-----------------------------------------------------------+
+|                                                             |
+|  +-------------+  +--------------+  +------------------+   |
+|  | pg_partman  |  | Apache AGE   |  | pg_duckdb        |   |
+|  |   5.4.0     |  |   1.6.0      |  |   1.1.x          |   |
+|  +-------------+  +--------------+  +------------------+   |
+|  | Declarative |  | Graph Queries|  | Embedded OLAP    |   |
+|  | Partitions  |  | Cypher DSL   |  | Parquet Reads    |   |
+|  | Auto-Maint  |  | Link Analysis|  | Analytics        |   |
+|  +-------------+  +--------------+  +------------------+   |
+|        |                |                  |                |
+|        +----------------+------------------+                |
+|                         v                                   |
+|                PostgreSQL 17 Core                           |
+|  + pgmq + pg_cron + pg_net + pgvector + pg_graphql          |
+|  + system_stats + PostGIS + RUM + pg_stat_statements       |
++-----------------------------------------------------------+
 ```
 
 ### Configuration
 
-**Environment Variables**:
-- `POSTGRES_DB=athena-mpc` - Database name
+**Environment Variables** (see compose.yml for full list):
+- `POSTGRES_DB=athena-mcp` - Database name
 - `POSTGRES_USER=postgres` - Superuser name
 - `POSTGRES_PASSWORD=postgres` - Superuser password
-- `POSTGRES_SHARED_PRELOAD_LIBRARIES=timescaledb,age,pg_duckdb,pg_mooncake` - Auto-load extensions
-- `DUCKDB_ALLOW_COMMUNITY_EXTENSIONS=true` - Enable DuckDB extensions
+- `POSTGRES_SHARED_PRELOAD_LIBRARIES=pg_partman_bgw,pg_stat_statements,age,pg_duckdb,pg_cron,pg_net`
 
-**Resource Limits** (in compose.yml):
-- Memory: 4GB limit, 1GB reservation
-- Shared memory: 512MB (required for DuckDB + AGE operations)
+**pg_partman BGW settings**:
+- `pg_partman_bgw.interval=3600` - Run maintenance every hour (seconds)
+- `pg_partman_bgw.dbname='athena-mcp'` - Target database
 
-**Port**: 46432 (host) → 5432 (container)
+**Port**: 46432 (host) -> 5432 (container)
 
-**Volume**: `pg_data` mounted to `/var/lib/postgresql/data`
-
-### Known Limitations
-
-1. **time_bucket conflict**: Both TimescaleDB and pg_duckdb define `time_bucket()`. When both are installed, use `duckdb.time_bucket()` for DuckDB queries.
-
-2. **JSONB in pg_mooncake**: pg_mooncake has limited JSONB support due to DuckDB type system differences. Simple arrays work, nested structures may not.
-
-3. **Iceberg storage required**: pg_mooncake columnstore tables require S3/MinIO for data operations. Table DDL works without storage, but INSERT/SELECT needs Iceberg config.
-
-4. **Moonlink service**: pg_mooncake runs a background Moonlink service for replication. Check logs for `Moonlink service started successfully`.
+**Volume**: `pg_data` mounted to `/home/postgres/pgdata`
 
 ### Troubleshooting
 
 #### Extensions not available
 
 ```bash
-# Check preload libraries
-docker exec athena-mcp-pg psql -U postgres -d athena-mpc -c \
+docker exec fetter-sack-db psql -U postgres -d athena-mcp -c \
   "SHOW shared_preload_libraries;"
-
-# Should show: timescaledb,age,pg_duckdb,pg_mooncake
+# Should show: pg_partman_bgw,age,pg_duckdb,pg_cron,pg_net,...
 ```
 
 #### AGE graph operations fail
@@ -332,49 +244,16 @@ docker exec athena-mcp-pg psql -U postgres -d athena-mpc -c \
 -- Ensure AGE is loaded in session
 LOAD 'age';
 SET search_path = ag_catalog, public;
-
--- Then run graph queries
-```
-
-#### pg_mooncake INSERT fails
-
-Check if Iceberg storage is configured:
-
-```sql
--- Verify mooncake settings
-SELECT name, setting FROM pg_settings WHERE name LIKE 'mooncake%';
-```
-
-For local testing without S3, use regular heap tables and DuckDB for analytics:
-
-```sql
--- Use DuckDB to query regular tables
-SELECT * FROM duckdb.read_parquet('/path/to/file.parquet');
 ```
 
 #### Out of shared memory
 
-Increase `shm_size` in compose.yml:
-
-```yaml
-services:
-  postgres:
-    shm_size: '1gb'  # Increase from 512mb
-```
-
-#### Container fails to start
-
-Check logs for Moonlink service errors:
-
-```bash
-docker logs athena-mcp-pg 2>&1 | grep -i moonlink
-```
+Increase `shm_size` in compose.yml (default 20gb for the 65GB container config).
 
 ### References
 
+- **pg_partman**: https://github.com/pgpartman/pg_partman
 - **Apache AGE**: https://age.apache.org/
-- **TimescaleDB**: https://docs.timescale.com/
-- **pg_mooncake**: https://github.com/Mooncake-Labs/pg_mooncake
 - **pg_duckdb**: https://github.com/duckdb/pg_duckdb
+- **pgmq**: https://github.com/tembo-io/pgmq
 - **PostgreSQL 17**: https://www.postgresql.org/docs/17/
-- **Project docs**: `/home/francis/rnd-athena-mcp/db/pg/cache/README.md`

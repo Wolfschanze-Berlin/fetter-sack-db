@@ -1,16 +1,16 @@
 # syntax=docker/dockerfile:1
-# PostgreSQL 17 Analytics Stack Image (Updated February 2026)
+# PostgreSQL 17 Analytics Stack Image (Updated April 2026)
 # Base: pgduckdb/pgduckdb:17-main (pg_duckdb v1.1.x with DuckDB v1.4.3)
-# Plus: TimescaleDB + Apache AGE + pgmq + pg_graphql + pg_net + pg_cron
-#       + pgvector + system_stats + DocumentDB
+# Plus: pg_partman + Apache AGE + pgmq + pg_graphql + pg_net + pg_cron
+#       + pgvector + system_stats
 #
 # Build (BuildKit required for parallel stages + cache mounts):
-#   DOCKER_BUILDKIT=1 docker build -t athena-mcp-pg:latest \
+#   DOCKER_BUILDKIT=1 docker build -t fetter-sack-db:latest \
 #     -f docker/Dockerfile.pg-analytics-stack docker/
 #
 # Build with max parallelism:
 #   DOCKER_BUILDKIT=1 docker build --build-arg BUILDKIT_INLINE_CACHE=1 \
-#     --parallel -t athena-mcp-pg:latest -f docker/Dockerfile.pg-analytics-stack docker/
+#     --parallel -t fetter-sack-db:latest -f docker/Dockerfile.pg-analytics-stack docker/
 #
 # Run:   docker compose up -d postgres
 
@@ -123,30 +123,28 @@ RUN --mount=type=cache,target=/ccache \
     && make PG_CONFIG=${PG_CONFIG} DESTDIR=/build install
 
 # -----------------------------------------------------------------------------
-# Build DocumentDB 0.109-0 (MongoDB-compatible document database)
-# Requires: PCRE2 10.40 (static) + Intel Decimal Math Library 2.0u3
-# Produces: documentdb_core + documentdb extensions
-# Note: install-documentdb doesn't honor DESTDIR — snapshot before/after
+# Build pg_hashids (Short unique ID generation from integers)
 # -----------------------------------------------------------------------------
-FROM builder-base AS build-documentdb
+FROM builder-base AS build-pg-hashids
 ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
 RUN --mount=type=cache,target=/ccache \
-    # Snapshot pre-install state
-    find /usr/lib/postgresql/17/lib/ /usr/share/postgresql/17/extension/ -type f | sort > /tmp/pre.txt \
-    && git clone --depth 1 --branch v0.109-0 \
-    https://github.com/documentdb/documentdb.git /tmp/documentdb \
-    && cd /tmp/documentdb \
-    && mkdir -p /tmp/docdb-deps \
-    && INSTALL_DEPENDENCIES_ROOT=/tmp/docdb-deps CLEANUP_SETUP=1 MAKE_PROGRAM=cmake bash scripts/install_setup_libbson.sh \
-    && INSTALL_DEPENDENCIES_ROOT=/tmp/docdb-deps CLEANUP_SETUP=1 bash scripts/install_setup_pcre2.sh \
-    && INSTALL_DEPENDENCIES_ROOT=/tmp/docdb-deps CLEANUP_SETUP=1 bash scripts/install_setup_intel_decimal_math_lib.sh \
-    && make PG_CONFIG=${PG_CONFIG} -j$(nproc) install-documentdb \
-    # Copy only newly installed files to /build
-    && find /usr/lib/postgresql/17/lib/ /usr/share/postgresql/17/extension/ -type f | sort > /tmp/post.txt \
-    && mkdir -p /build \
-    && comm -13 /tmp/pre.txt /tmp/post.txt | while read f; do \
-         mkdir -p "/build$(dirname "$f")" && cp "$f" "/build$f"; \
-       done
+    git clone --depth 1 \
+    https://github.com/iCyberon/pg_hashids.git /tmp/pg_hashids \
+    && cd /tmp/pg_hashids \
+    && USE_PGXS=1 make PG_CONFIG=${PG_CONFIG} -j$(nproc) \
+    && USE_PGXS=1 make PG_CONFIG=${PG_CONFIG} DESTDIR=/build install
+
+# -----------------------------------------------------------------------------
+# Build pg_partman 5.4.0 (Partition management)
+# -----------------------------------------------------------------------------
+FROM builder-base AS build-pg-partman
+ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+RUN --mount=type=cache,target=/ccache \
+    git clone --depth 1 --branch v5.4.0 \
+    https://github.com/pgpartman/pg_partman.git /tmp/pg_partman \
+    && cd /tmp/pg_partman \
+    && make PG_CONFIG=${PG_CONFIG} -j$(nproc) \
+    && make PG_CONFIG=${PG_CONFIG} DESTDIR=/build install
 
 # -----------------------------------------------------------------------------
 # Build pg_graphql 1.5.12 (GraphQL extension — Rust/pgrx, slowest build)
@@ -163,7 +161,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     find /usr/lib/postgresql/17/lib/ /usr/share/postgresql/17/extension/ -type f | sort > /tmp/pre.txt \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && . $HOME/.cargo/env \
-    && cargo install cargo-pgrx --version 0.16.1 --locked \
+    && cargo install cargo-pgrx --version 0.16.1 --locked --force \
     && cargo pgrx init --pg17 ${PG_CONFIG} \
     && git clone --depth 1 --branch v1.5.12 \
        https://github.com/supabase/pg_graphql.git /tmp/pg_graphql \
@@ -183,26 +181,19 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
 FROM pgduckdb/pgduckdb:17-main
 
 LABEL maintainer="MainSystemDev"
-LABEL description="PostgreSQL 17 Analytics Stack: pg_duckdb, TimescaleDB, AGE, pgmq, pg_graphql, pg_net, pg_cron, pgvector, system_stats, DocumentDB"
-LABEL version="pg17-duckdb1.1-full-stack-2026.02"
+LABEL description="PostgreSQL 17 Analytics Stack: pg_duckdb, pg_partman, AGE, pgmq, pg_graphql, pg_net, pg_cron, pgvector, system_stats"
+LABEL version="pg17-duckdb1.1-full-stack-2026.04"
 
 USER root
 
 # -----------------------------------------------------------------------------
-# Install TimescaleDB from official repository (apt-cached)
+# Install runtime dependencies (apt-cached)
 # -----------------------------------------------------------------------------
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    lsb-release \
-    wget \
-    gnupg2 \
     libreadline8 \
     libcurl4 \
-    && echo "deb https://packagecloud.io/timescale/timescaledb/debian/ $(lsb_release -c -s) main" > /etc/apt/sources.list.d/timescaledb.list \
-    && wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | apt-key add - \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends timescaledb-2-postgresql-17 \
     postgresql-17-postgis-3 \
     postgresql-17-rum
 
@@ -210,6 +201,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Copy all C extensions from parallel build stages (DESTDIR=/build)
 # Uses consolidated COPY to minimize layers
 # -----------------------------------------------------------------------------
+
+# pg_partman
+COPY --from=build-pg-partman /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
+COPY --from=build-pg-partman /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
 
 # Apache AGE
 COPY --from=build-age /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
@@ -234,9 +229,9 @@ COPY --from=build-pgvector /build/usr/share/postgresql/17/extension/ /usr/share/
 COPY --from=build-system-stats /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
 COPY --from=build-system-stats /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
 
-# DocumentDB (documentdb_core + documentdb)
-COPY --from=build-documentdb /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
-COPY --from=build-documentdb /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+# pg_hashids
+COPY --from=build-pg-hashids /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
+COPY --from=build-pg-hashids /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
 
 # pg_graphql (built with pgrx — snapshot-based DESTDIR)
 COPY --from=build-pg-graphql /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
@@ -248,13 +243,12 @@ RUN echo "=== Verifying extensions ===" \
     && test -f /usr/lib/postgresql/17/lib/pg_cron.so \
     && test -f /usr/lib/postgresql/17/lib/pg_net.so \
     && test -f /usr/lib/postgresql/17/lib/pg_graphql.so \
-    && test -f /usr/share/postgresql/17/extension/timescaledb.control \
+    && test -f /usr/share/postgresql/17/extension/pg_partman.control \
     && test -f /usr/share/postgresql/17/extension/pgmq.control \
     && test -f /usr/lib/postgresql/17/lib/vector.so \
     && test -f /usr/lib/postgresql/17/lib/system_stats.so \
-    && test -f /usr/lib/postgresql/17/lib/pg_documentdb_core.so \
-    && test -f /usr/lib/postgresql/17/lib/pg_documentdb.so \
-    && echo "All 10 extensions verified!"
+    && test -f /usr/lib/postgresql/17/lib/pg_hashids.so \
+    && echo "All 9 extensions verified!"
 
 # Switch back to postgres user
 USER postgres
@@ -268,7 +262,7 @@ ENV DUCKDB_ALLOW_COMMUNITY_EXTENSIONS="true"
 # Start PostgreSQL with required extensions preloaded
 # pg_cron and pg_net require shared_preload_libraries
 CMD ["postgres", \
-     "-c", "shared_preload_libraries=timescaledb,age,pg_duckdb,pg_cron,pg_net,pg_documentdb_core,pg_documentdb", \
+     "-c", "shared_preload_libraries=pg_partman_bgw,pg_stat_statements,age,pg_duckdb,pg_cron,pg_net", \
      "-c", "shared_buffers=512MB", \
      "-c", "wal_level=logical", \
      "-c", "max_wal_senders=10", \
@@ -277,7 +271,8 @@ CMD ["postgres", \
 
 # =============================================================================
 # Extension Installation Order (in database):
-#   1. CREATE EXTENSION timescaledb;        -- Time-series (hypertables, compression)
+#   1. CREATE SCHEMA partman;
+#      CREATE EXTENSION pg_partman SCHEMA partman;  -- Partition management (time/id-based)
 #   2. CREATE EXTENSION age;                -- Graph database (Cypher queries)
 #      LOAD 'age';
 #      SET search_path = ag_catalog, public;
@@ -288,12 +283,10 @@ CMD ["postgres", \
 #   7. CREATE EXTENSION pg_graphql;         -- GraphQL API
 #   8. CREATE EXTENSION vector;             -- Vector similarity search (pgvector)
 #   9. CREATE EXTENSION system_stats;       -- OS-level system metrics
-#  10. CREATE EXTENSION documentdb_core;    -- BSON data type (DocumentDB core)
-#  11. CREATE EXTENSION documentdb;         -- MongoDB-compatible CRUD API
 #
 # Extension Versions:
 #   - pg_duckdb 1.1.x (DuckDB 1.4.3)
-#   - TimescaleDB 2.25.x
+#   - pg_partman 5.4.0
 #   - Apache AGE 1.6.0
 #   - pgmq 1.9.0
 #   - pg_cron 1.6.7
@@ -301,12 +294,10 @@ CMD ["postgres", \
 #   - pg_graphql 1.5.12
 #   - pgvector 0.8.1
 #   - system_stats 3.2
-#   - DocumentDB 0.109-0
 #
 # External Tools (NOT included, run separately):
 #   - PostgREST: REST API server (docker run postgrest/postgrest)
 #   - pg-boss: Node.js job queue library (npm install pg-boss)
-#   - pg_documentdb_gw: MongoDB wire protocol gateway (build separately with pgrx)
 #
 # Build Performance Notes:
 #   - All 8 source-built extensions compile in PARALLEL (BuildKit)
