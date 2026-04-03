@@ -5,7 +5,9 @@
 
 # Docker volumes & build artifacts
 pg_data/
-db/pg/cache/
+db/pg/cache/*
+!db/pg/cache/*.sql
+!db/pg/cache/*.sh
 
 # Logs
 *.log
