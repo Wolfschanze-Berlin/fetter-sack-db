@@ -219,7 +219,7 @@ services:
       PGRST_DB_CHANNEL_ENABLED: "true"
       PGRST_DB_CHANNEL: pgrst
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/rpc/health || sh -c 'echo | nc -w1 127.0.0.1 3000'"]
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:3000/rpc/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
