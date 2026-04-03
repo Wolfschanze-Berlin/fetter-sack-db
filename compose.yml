@@ -1,173 +1,142 @@
 ####################################################################
-# Profiles:
-#   dev  — builds postgres image locally (default for local work)
-#   prod — pulls pre-built image from GHCR
-#
-# Usage:
-#   docker compose --profile dev  up -d
-#   docker compose --profile prod up -d
+# Production compose — deployed by Coolify
+# For local dev: docker compose auto-loads compose.override.yml
+#   which adds postgres-local (builds from Dockerfile)
 ####################################################################
-
-x-postgres-common: &postgres-common
-  environment:
-    POSTGRES_DB: athena-mcp
-    POSTGRES_USER: postgres
-    POSTGRES_PASSWORD: postgres
-    PGDATA: /var/lib/postgresql/data
-    POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
-    # Extension configuration
-    POSTGRES_SHARED_PRELOAD_LIBRARIES: "pg_partman_bgw,pg_stat_statements,age,pg_duckdb,pg_cron,pg_net"
-    # DuckDB settings
-    DUCKDB_ALLOW_COMMUNITY_EXTENSIONS: "true"
-    # ============================================
-    # PostgreSQL Ultra High-Performance Tuning (65GB container)
-    # ============================================
-    # Memory Configuration (scaled for 65GB)
-    PG_SHARED_BUFFERS: "16GB" # 25% of container RAM
-    PG_EFFECTIVE_CACHE_SIZE: "48GB" # 75% of container RAM
-    PG_WORK_MEM: "512MB" # Per-operation sort/hash memory (doubled)
-    PG_MAINTENANCE_WORK_MEM: "4GB" # VACUUM, CREATE INDEX, ALTER TABLE
-    PG_WAL_BUFFERS: "128MB" # WAL write buffer (doubled for heavy writes)
-    PG_HUGE_PAGES: "try" # Use huge pages if available
-    # Parallelism (scaled for more cores)
-    PG_MAX_WORKER_PROCESSES: "24" # Total background workers
-    PG_MAX_PARALLEL_WORKERS: "16" # Parallel query workers
-    PG_MAX_PARALLEL_WORKERS_PER_GATHER: "8" # Per-query parallelism
-    PG_MAX_PARALLEL_MAINTENANCE_WORKERS: "6" # Parallel index builds
-    # Connections
-    PG_MAX_CONNECTIONS: "300" # Connection pool ceiling (increased)
-    # ============================================
-    # Write Performance Optimization (NEW)
-    # ============================================
-    # Commit batching (reduces fsync calls dramatically)
-    PG_COMMIT_DELAY: "10000" # 10ms delay to batch commits
-    PG_COMMIT_SIBLINGS: "5" # Only delay if 5+ transactions active
-    # Asynchronous commit (3-5x write speedup, risk: up to 600ms data loss on crash)
-    PG_SYNCHRONOUS_COMMIT: "off" # Safe for analytics workloads
-    # ============================================
-    # Checkpoints & WAL (scaled for 65GB)
-    # ============================================
-    PG_CHECKPOINT_COMPLETION_TARGET: "0.9" # Spread checkpoint writes
-    PG_WAL_COMPRESSION: "zstd" # Compress WAL (PG17+)
-    PG_MIN_WAL_SIZE: "2GB" # Doubled
-    PG_MAX_WAL_SIZE: "8GB" # Doubled for heavy writes
-    PG_CHECKPOINT_TIMEOUT: "15min" # Longer checkpoint interval
-    # Query Planner
-    PG_RANDOM_PAGE_COST: "1.1" # SSD-optimized (default 4.0)
-    PG_EFFECTIVE_IO_CONCURRENCY: "200" # SSD concurrent I/O
-    PG_DEFAULT_STATISTICS_TARGET: "200" # Better query plans
-    # JIT Compilation
-    PG_JIT: "on"
-    PG_JIT_ABOVE_COST: "100000"
-    # ============================================
-    # Extension-Specific Tuning (scaled for 65GB)
-    # ============================================
-    # DuckDB (embedded OLAP) - gets more memory
-    DUCKDB_MEMORY_LIMIT: "24GB" # DuckDB can use up to 24GB
-    DUCKDB_THREADS: "12" # DuckDB parallelism (increased)
-    # pg_partman BGW
-    PG_PARTMAN_BGW_INTERVAL: "3600" # Run maintenance every hour
-    PG_PARTMAN_BGW_DBNAME: "athena-mcp" # Database for partition maintenance
-    # AGE (Graph)
-    AGE_ENABLE_CYPHER: "true"
-  # PostgreSQL command with runtime config (65GB optimized)
-  command: >
-    postgres
-    -c shared_buffers=16GB
-    -c effective_cache_size=48GB
-    -c work_mem=512MB
-    -c maintenance_work_mem=4GB
-    -c wal_buffers=128MB
-    -c max_worker_processes=24
-    -c max_parallel_workers=16
-    -c max_parallel_workers_per_gather=8
-    -c max_parallel_maintenance_workers=6
-    -c max_connections=300
-    -c checkpoint_completion_target=0.9
-    -c checkpoint_timeout=15min
-    -c wal_compression=zstd
-    -c min_wal_size=2GB
-    -c max_wal_size=8GB
-    -c random_page_cost=1.1
-    -c effective_io_concurrency=200
-    -c default_statistics_target=200
-    -c jit=on
-    -c jit_above_cost=100000
-    -c huge_pages=try
-    -c shared_preload_libraries='pg_partman_bgw,pg_stat_statements,age,pg_duckdb,pg_cron,pg_net'
-    -c commit_delay=10000
-    -c commit_siblings=5
-    -c synchronous_commit=off
-    -c pg_partman_bgw.interval=3600
-    -c pg_partman_bgw.dbname='athena-mcp'
-    -c duckdb.memory_limit='24GB'
-    -c duckdb.threads=12
-    -c log_min_duration_statement=1000
-    -c log_checkpoints=on
-    -c log_lock_waits=on
-    -c track_io_timing=on
-    -c track_functions=all
-    -c cron.database_name=athena-mcp
-  volumes:
-    - pg_data:/var/lib/postgresql/data
-    - ./db/pg/cache:/docker-entrypoint-initdb.d:ro
-  healthcheck:
-    test: ["CMD-SHELL", "pg_isready -U postgres -d athena-mcp"]
-    interval: 5s
-    timeout: 5s
-    retries: 5
-    start_period: 60s # Increased for larger shared_buffers init
-  shm_size: "20gb" # Critical for shared_buffers (16GB) + DuckDB + AGE
-  restart: unless-stopped
-  # Linux kernel tuning (requires privileged or host sysctl)
-  sysctls:
-    - net.core.somaxconn=65535
-    - net.ipv4.tcp_max_syn_backlog=65535
-  ulimits:
-    memlock:
-      soft: -1
-      hard: -1
-    nofile:
-      soft: 65536
-      hard: 65536
-  deploy:
-    resources:
-      limits:
-        memory: 65G # Ultra high-performance analytics
-      reservations:
-        memory: 32G
 
 services:
   # --------------------------------------------------------------------------
-  # PostgreSQL (dev): builds image locally from Dockerfile
-  # Service gets alias 'postgres' so pgbouncer resolves it in dev too
+  # PostgreSQL: pulls pre-built image from GHCR
   # --------------------------------------------------------------------------
-  postgres-local:
-    <<: *postgres-common
-    profiles: [dev]
-    container_name: fetter-sack-db
-    ports:
-      - "46432:5432" # Direct PG (admin, migrations, pg_duckdb)
-    build:
-      context: ./docker
-      dockerfile: Dockerfile.pg-analytics-stack
-    image: fetter-sack-db:latest
-    networks:
-      default:
-        aliases:
-          - postgres
+  postgres:
+    image: ghcr.io/wolfschanze-berlin/fetter-sack-db:latest
+    environment:
+      POSTGRES_DB: athena-mcp
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      PGDATA: /var/lib/postgresql/data
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+      # Extension configuration
+      POSTGRES_SHARED_PRELOAD_LIBRARIES: "pg_partman_bgw,pg_stat_statements,age,pg_duckdb,pg_cron,pg_net"
+      # DuckDB settings
+      DUCKDB_ALLOW_COMMUNITY_EXTENSIONS: "true"
+      # ============================================
+      # PostgreSQL Ultra High-Performance Tuning (65GB container)
+      # ============================================
+      # Memory Configuration (scaled for 65GB)
+      PG_SHARED_BUFFERS: "16GB" # 25% of container RAM
+      PG_EFFECTIVE_CACHE_SIZE: "48GB" # 75% of container RAM
+      PG_WORK_MEM: "512MB" # Per-operation sort/hash memory (doubled)
+      PG_MAINTENANCE_WORK_MEM: "4GB" # VACUUM, CREATE INDEX, ALTER TABLE
+      PG_WAL_BUFFERS: "128MB" # WAL write buffer (doubled for heavy writes)
+      PG_HUGE_PAGES: "try" # Use huge pages if available
+      # Parallelism (scaled for more cores)
+      PG_MAX_WORKER_PROCESSES: "24" # Total background workers
+      PG_MAX_PARALLEL_WORKERS: "16" # Parallel query workers
+      PG_MAX_PARALLEL_WORKERS_PER_GATHER: "8" # Per-query parallelism
+      PG_MAX_PARALLEL_MAINTENANCE_WORKERS: "6" # Parallel index builds
+      # Connections
+      PG_MAX_CONNECTIONS: "300" # Connection pool ceiling (increased)
+      # ============================================
+      # Write Performance Optimization
+      # ============================================
+      # Commit batching (reduces fsync calls dramatically)
+      PG_COMMIT_DELAY: "10000" # 10ms delay to batch commits
+      PG_COMMIT_SIBLINGS: "5" # Only delay if 5+ transactions active
+      # Asynchronous commit (3-5x write speedup, risk: up to 600ms data loss on crash)
+      PG_SYNCHRONOUS_COMMIT: "off" # Safe for analytics workloads
+      # ============================================
+      # Checkpoints & WAL (scaled for 65GB)
+      # ============================================
+      PG_CHECKPOINT_COMPLETION_TARGET: "0.9" # Spread checkpoint writes
+      PG_WAL_COMPRESSION: "zstd" # Compress WAL (PG17+)
+      PG_MIN_WAL_SIZE: "2GB" # Doubled
+      PG_MAX_WAL_SIZE: "8GB" # Doubled for heavy writes
+      PG_CHECKPOINT_TIMEOUT: "15min" # Longer checkpoint interval
+      # Query Planner
+      PG_RANDOM_PAGE_COST: "1.1" # SSD-optimized (default 4.0)
+      PG_EFFECTIVE_IO_CONCURRENCY: "200" # SSD concurrent I/O
+      PG_DEFAULT_STATISTICS_TARGET: "200" # Better query plans
+      # JIT Compilation
+      PG_JIT: "on"
+      PG_JIT_ABOVE_COST: "100000"
+      # ============================================
+      # Extension-Specific Tuning (scaled for 65GB)
+      # ============================================
+      # DuckDB (embedded OLAP) - gets more memory
+      DUCKDB_MEMORY_LIMIT: "24GB" # DuckDB can use up to 24GB
+      DUCKDB_THREADS: "12" # DuckDB parallelism (increased)
+      # pg_partman BGW
+      PG_PARTMAN_BGW_INTERVAL: "3600" # Run maintenance every hour
+      PG_PARTMAN_BGW_DBNAME: "athena-mcp" # Database for partition maintenance
+      # AGE (Graph)
+      AGE_ENABLE_CYPHER: "true"
+    # PostgreSQL command with runtime config (65GB optimized)
+    command: >
+      postgres
+      -c shared_buffers=16GB
+      -c effective_cache_size=48GB
+      -c work_mem=512MB
+      -c maintenance_work_mem=4GB
+      -c wal_buffers=128MB
+      -c max_worker_processes=24
+      -c max_parallel_workers=16
+      -c max_parallel_workers_per_gather=8
+      -c max_parallel_maintenance_workers=6
+      -c max_connections=300
+      -c checkpoint_completion_target=0.9
+      -c checkpoint_timeout=15min
+      -c wal_compression=zstd
+      -c min_wal_size=2GB
+      -c max_wal_size=8GB
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c default_statistics_target=200
+      -c jit=on
+      -c jit_above_cost=100000
+      -c huge_pages=try
+      -c shared_preload_libraries='pg_partman_bgw,pg_stat_statements,age,pg_duckdb,pg_cron,pg_net'
+      -c commit_delay=10000
+      -c commit_siblings=5
+      -c synchronous_commit=off
+      -c pg_partman_bgw.interval=3600
+      -c pg_partman_bgw.dbname='athena-mcp'
+      -c duckdb.memory_limit='24GB'
+      -c duckdb.threads=12
+      -c log_min_duration_statement=1000
+      -c log_checkpoints=on
+      -c log_lock_waits=on
+      -c track_io_timing=on
+      -c track_functions=all
+      -c cron.database_name=athena-mcp
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./db/pg/cache:/docker-entrypoint-initdb.d:ro
-      - /mnt/camelot/duckdb:/parquet:ro
-
-  # --------------------------------------------------------------------------
-  # PostgreSQL (prod): pulls pre-built image from GHCR
-  # --------------------------------------------------------------------------
-  postgres:
-    <<: *postgres-common
-    profiles: [prod]
-    image: ghcr.io/wolfschanze-berlin/fetter-sack-db:latest
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d athena-mcp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 60s # Increased for larger shared_buffers init
+    shm_size: "20gb" # Critical for shared_buffers (16GB) + DuckDB + AGE
+    restart: unless-stopped
+    # Linux kernel tuning (requires privileged or host sysctl)
+    sysctls:
+      - net.core.somaxconn=65535
+      - net.ipv4.tcp_max_syn_backlog=65535
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    deploy:
+      resources:
+        limits:
+          memory: 65G # Ultra high-performance analytics
+        reservations:
+          memory: 32G
 
   # --------------------------------------------------------------------------
   # PgBouncer: connection pooler
@@ -180,12 +149,8 @@ services:
       - ./docker/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./docker/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
     depends_on:
-      postgres-local:
-        condition: service_healthy
-        required: false
       postgres:
         condition: service_healthy
-        required: false
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 || exit 1"]
       interval: 10s
@@ -207,8 +172,6 @@ services:
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_EXTRA_SEARCH_PATH: public,app,analytics,embeddings,partman
       # ─── Connection Pool ─────────────────────────────────────────────
-      # PostgREST's internal pool — sits between PostgREST and PgBouncer
-      # Keep modest since PgBouncer handles the heavy pooling
       PGRST_DB_POOL: "20"
       PGRST_DB_POOL_ACQUISITION_TIMEOUT: "10"
       # CRITICAL: disable prepared statements for PgBouncer transaction mode
@@ -218,22 +181,17 @@ services:
       PGRST_JWT_SECRET_IS_BASE64: "false"
       PGRST_JWT_CACHE_MAX_LIFETIME: "300"
       # ─── API Behavior ───────────────────────────────────────────────
-      # Max rows per response (pagination guard; use Range header for more)
       PGRST_DB_MAX_ROWS: "1000"
-      # Enable aggregate functions: count, sum, avg, min, max via /table?select=count()
       PGRST_DB_AGGREGATES_ENABLED: "true"
-      # Enable EXPLAIN output via Accept: application/vnd.pgrst.plan header (dev debugging)
       PGRST_DB_PLAN_ENABLED: "true"
-      # ─── CORS (open for local dev — restrict in production) ──────────
+      # ─── CORS ────────────────────────────────────────────────────────
       PGRST_SERVER_CORS_ALLOWED_ORIGINS: ""
-      # ─── OpenAPI / Developer Experience ──────────────────────────────
+      # ─── OpenAPI ─────────────────────────────────────────────────────
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:46433
       PGRST_OPENAPI_SECURITY_ACTIVE: "true"
       # ─── Logging ─────────────────────────────────────────────────────
       PGRST_LOG_LEVEL: warn
       # ─── Schema Cache ───────────────────────────────────────────────
-      # Auto-reload schema cache via LISTEN on pgrst channel
-      # Run NOTIFY pgrst, 'reload schema' after DDL changes
       PGRST_DB_CHANNEL_ENABLED: "true"
       PGRST_DB_CHANNEL: pgrst
     healthcheck:
@@ -246,10 +204,6 @@ services:
       pgbouncer:
         condition: service_healthy
     restart: unless-stopped
-
-networks:
-  default:
-    driver: bridge
 
 volumes:
   pg_data:

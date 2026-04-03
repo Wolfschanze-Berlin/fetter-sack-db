@@ -1,0 +1,29 @@
+####################################################################
+# Local dev overrides — auto-loaded by docker compose
+# Overrides postgres to build from local Dockerfile instead of GHCR
+# Adds host port bindings for direct access
+####################################################################
+
+services:
+  postgres:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.pg-analytics-stack
+    image: fetter-sack-db:latest
+    container_name: fetter-sack-db
+    ports:
+      - "46432:5432" # Direct PG (admin, migrations, pg_duckdb)
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./db/pg/cache:/docker-entrypoint-initdb.d:ro
+      - /mnt/camelot/duckdb:/parquet:ro
+
+  pgbouncer:
+    container_name: fetter-sack-bouncer
+    ports:
+      - "46434:5432" # Pooled PG connections (apps should connect here)
+
+  postgrest:
+    container_name: fetter-sack-rest
+    ports:
+      - "46433:3000" # REST API
