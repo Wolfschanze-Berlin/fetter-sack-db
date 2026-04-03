@@ -1,0 +1,319 @@
+# syntax=docker/dockerfile:1
+# PostgreSQL 17 Analytics Stack Image (Updated February 2026)
+# Base: pgduckdb/pgduckdb:17-main (pg_duckdb v1.1.x with DuckDB v1.4.3)
+# Plus: TimescaleDB + Apache AGE + pgmq + pg_graphql + pg_net + pg_cron
+#       + pgvector + system_stats + DocumentDB
+#
+# Build (BuildKit required for parallel stages + cache mounts):
+#   DOCKER_BUILDKIT=1 docker build -t athena-mcp-pg:latest \
+#     -f docker/Dockerfile.pg-analytics-stack docker/
+#
+# Build with max parallelism:
+#   DOCKER_BUILDKIT=1 docker build --build-arg BUILDKIT_INLINE_CACHE=1 \
+#     --parallel -t athena-mcp-pg:latest -f docker/Dockerfile.pg-analytics-stack docker/
+#
+# Run:   docker compose up -d postgres
+
+# =============================================================================
+# Stage 0: Shared builder base with all build dependencies + ccache
+# =============================================================================
+FROM pgduckdb/pgduckdb:17-main AS builder-base
+
+USER root
+
+ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    libreadline-dev \
+    zlib1g-dev \
+    flex \
+    bison \
+    postgresql-server-dev-17 \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    libcurl4-openssl-dev \
+    curl \
+    libkrb5-dev \
+    ccache
+
+# Enable ccache for all C/C++ builds
+ENV PATH="/usr/lib/ccache:${PATH}"
+ENV CCACHE_DIR="/ccache"
+ENV CCACHE_MAXSIZE="1G"
+
+# =============================================================================
+# Parallel Build Stages — BuildKit builds all independent stages concurrently
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Build Apache AGE 1.6.0 (Graph database with Cypher)
+# -----------------------------------------------------------------------------
+FROM builder-base AS build-age
+ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+RUN --mount=type=cache,target=/ccache \
+    git clone --depth 1 --branch release/PG17/1.6.0 \
+    https://github.com/apache/age.git /tmp/age \
+    && cd /tmp/age \
+    && make PG_CONFIG=${PG_CONFIG} -j$(nproc) \
+    && make PG_CONFIG=${PG_CONFIG} DESTDIR=/build install
+
+# -----------------------------------------------------------------------------
+# Build pgmq 1.9.0 (Message queue)
+# -----------------------------------------------------------------------------
+FROM builder-base AS build-pgmq
+ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+RUN --mount=type=cache,target=/ccache \
+    git clone --depth 1 --branch v1.9.0 \
+    https://github.com/tembo-io/pgmq.git /tmp/pgmq \
+    && cd /tmp/pgmq/pgmq-extension \
+    && make PG_CONFIG=${PG_CONFIG} -j$(nproc) \
+    && make PG_CONFIG=${PG_CONFIG} DESTDIR=/build install
+
+# -----------------------------------------------------------------------------
+# Build pg_cron 1.6.7 (Job scheduler)
+# -----------------------------------------------------------------------------
+FROM builder-base AS build-pg-cron
+ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+RUN --mount=type=cache,target=/ccache \
+    git clone --depth 1 --branch v1.6.7 \
+    https://github.com/citusdata/pg_cron.git /tmp/pg_cron \
+    && cd /tmp/pg_cron \
+    && make PG_CONFIG=${PG_CONFIG} -j$(nproc) \
+    && make PG_CONFIG=${PG_CONFIG} DESTDIR=/build install
+
+# -----------------------------------------------------------------------------
+# Build pg_net 0.20.2 (HTTP client from SQL)
+# -----------------------------------------------------------------------------
+FROM builder-base AS build-pg-net
+ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+RUN --mount=type=cache,target=/ccache \
+    git clone --depth 1 --branch v0.20.2 \
+    https://github.com/supabase/pg_net.git /tmp/pg_net \
+    && cd /tmp/pg_net \
+    && make PG_CONFIG=${PG_CONFIG} -j$(nproc) \
+    && make PG_CONFIG=${PG_CONFIG} DESTDIR=/build install
+
+# -----------------------------------------------------------------------------
+# Build pgvector 0.8.1 (Vector similarity search)
+# -----------------------------------------------------------------------------
+FROM builder-base AS build-pgvector
+ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+RUN --mount=type=cache,target=/ccache \
+    git clone --depth 1 --branch v0.8.1 \
+    https://github.com/pgvector/pgvector.git /tmp/pgvector \
+    && cd /tmp/pgvector \
+    && make PG_CONFIG=${PG_CONFIG} -j$(nproc) \
+    && make PG_CONFIG=${PG_CONFIG} DESTDIR=/build install
+
+# -----------------------------------------------------------------------------
+# Build system_stats 3.2 (OS-level system metrics from SQL)
+# -----------------------------------------------------------------------------
+FROM builder-base AS build-system-stats
+ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+RUN --mount=type=cache,target=/ccache \
+    git clone --depth 1 --branch v3.2 \
+    https://github.com/EnterpriseDB/system_stats.git /tmp/system_stats \
+    && cd /tmp/system_stats \
+    && make PG_CONFIG=${PG_CONFIG} -j$(nproc) \
+    && make PG_CONFIG=${PG_CONFIG} DESTDIR=/build install
+
+# -----------------------------------------------------------------------------
+# Build DocumentDB 0.109-0 (MongoDB-compatible document database)
+# Requires: PCRE2 10.40 (static) + Intel Decimal Math Library 2.0u3
+# Produces: documentdb_core + documentdb extensions
+# Note: install-documentdb doesn't honor DESTDIR — snapshot before/after
+# -----------------------------------------------------------------------------
+FROM builder-base AS build-documentdb
+ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+RUN --mount=type=cache,target=/ccache \
+    # Snapshot pre-install state
+    find /usr/lib/postgresql/17/lib/ /usr/share/postgresql/17/extension/ -type f | sort > /tmp/pre.txt \
+    && git clone --depth 1 --branch v0.109-0 \
+    https://github.com/documentdb/documentdb.git /tmp/documentdb \
+    && cd /tmp/documentdb \
+    && mkdir -p /tmp/docdb-deps \
+    && INSTALL_DEPENDENCIES_ROOT=/tmp/docdb-deps CLEANUP_SETUP=1 MAKE_PROGRAM=cmake bash scripts/install_setup_libbson.sh \
+    && INSTALL_DEPENDENCIES_ROOT=/tmp/docdb-deps CLEANUP_SETUP=1 bash scripts/install_setup_pcre2.sh \
+    && INSTALL_DEPENDENCIES_ROOT=/tmp/docdb-deps CLEANUP_SETUP=1 bash scripts/install_setup_intel_decimal_math_lib.sh \
+    && make PG_CONFIG=${PG_CONFIG} -j$(nproc) install-documentdb \
+    # Copy only newly installed files to /build
+    && find /usr/lib/postgresql/17/lib/ /usr/share/postgresql/17/extension/ -type f | sort > /tmp/post.txt \
+    && mkdir -p /build \
+    && comm -13 /tmp/pre.txt /tmp/post.txt | while read f; do \
+         mkdir -p "/build$(dirname "$f")" && cp "$f" "/build$f"; \
+       done
+
+# -----------------------------------------------------------------------------
+# Build pg_graphql 1.5.12 (GraphQL extension — Rust/pgrx, slowest build)
+# Isolated stage: Rust toolchain + cargo caches don't affect C builds
+# Note: pgrx doesn't support DESTDIR — snapshot before/after
+# -----------------------------------------------------------------------------
+FROM builder-base AS build-pg-graphql
+ARG PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/bin,sharing=locked \
+    --mount=type=cache,target=/ccache \
+    # Snapshot pre-install state
+    find /usr/lib/postgresql/17/lib/ /usr/share/postgresql/17/extension/ -type f | sort > /tmp/pre.txt \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && . $HOME/.cargo/env \
+    && cargo install cargo-pgrx --version 0.16.1 --locked \
+    && cargo pgrx init --pg17 ${PG_CONFIG} \
+    && git clone --depth 1 --branch v1.5.12 \
+       https://github.com/supabase/pg_graphql.git /tmp/pg_graphql \
+    && cd /tmp/pg_graphql \
+    && . $HOME/.cargo/env \
+    && cargo pgrx install --pg-config ${PG_CONFIG} --release \
+    # Copy only newly installed files to /build
+    && find /usr/lib/postgresql/17/lib/ /usr/share/postgresql/17/extension/ -type f | sort > /tmp/post.txt \
+    && mkdir -p /build \
+    && comm -13 /tmp/pre.txt /tmp/post.txt | while read f; do \
+         mkdir -p "/build$(dirname "$f")" && cp "$f" "/build$f"; \
+       done
+
+# =============================================================================
+# Final Stage: Assemble all extensions into slim runtime image
+# =============================================================================
+FROM pgduckdb/pgduckdb:17-main
+
+LABEL maintainer="MainSystemDev"
+LABEL description="PostgreSQL 17 Analytics Stack: pg_duckdb, TimescaleDB, AGE, pgmq, pg_graphql, pg_net, pg_cron, pgvector, system_stats, DocumentDB"
+LABEL version="pg17-duckdb1.1-full-stack-2026.02"
+
+USER root
+
+# -----------------------------------------------------------------------------
+# Install TimescaleDB from official repository (apt-cached)
+# -----------------------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    lsb-release \
+    wget \
+    gnupg2 \
+    libreadline8 \
+    libcurl4 \
+    && echo "deb https://packagecloud.io/timescale/timescaledb/debian/ $(lsb_release -c -s) main" > /etc/apt/sources.list.d/timescaledb.list \
+    && wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | apt-key add - \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends timescaledb-2-postgresql-17 \
+    postgresql-17-postgis-3 \
+    postgresql-17-rum
+
+# -----------------------------------------------------------------------------
+# Copy all C extensions from parallel build stages (DESTDIR=/build)
+# Uses consolidated COPY to minimize layers
+# -----------------------------------------------------------------------------
+
+# Apache AGE
+COPY --from=build-age /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
+COPY --from=build-age /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+
+# pgmq (SQL-only, no .so)
+COPY --from=build-pgmq /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+
+# pg_cron
+COPY --from=build-pg-cron /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
+COPY --from=build-pg-cron /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+
+# pg_net
+COPY --from=build-pg-net /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
+COPY --from=build-pg-net /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+
+# pgvector
+COPY --from=build-pgvector /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
+COPY --from=build-pgvector /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+
+# system_stats
+COPY --from=build-system-stats /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
+COPY --from=build-system-stats /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+
+# DocumentDB (documentdb_core + documentdb)
+COPY --from=build-documentdb /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
+COPY --from=build-documentdb /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+
+# pg_graphql (built with pgrx — snapshot-based DESTDIR)
+COPY --from=build-pg-graphql /build/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
+COPY --from=build-pg-graphql /build/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+
+# Verify critical extension files in a single layer
+RUN echo "=== Verifying extensions ===" \
+    && test -f /usr/lib/postgresql/17/lib/age.so \
+    && test -f /usr/lib/postgresql/17/lib/pg_cron.so \
+    && test -f /usr/lib/postgresql/17/lib/pg_net.so \
+    && test -f /usr/lib/postgresql/17/lib/pg_graphql.so \
+    && test -f /usr/share/postgresql/17/extension/timescaledb.control \
+    && test -f /usr/share/postgresql/17/extension/pgmq.control \
+    && test -f /usr/lib/postgresql/17/lib/vector.so \
+    && test -f /usr/lib/postgresql/17/lib/system_stats.so \
+    && test -f /usr/lib/postgresql/17/lib/pg_documentdb_core.so \
+    && test -f /usr/lib/postgresql/17/lib/pg_documentdb.so \
+    && echo "All 10 extensions verified!"
+
+# Switch back to postgres user
+USER postgres
+
+# -----------------------------------------------------------------------------
+# Environment configuration
+# -----------------------------------------------------------------------------
+ENV POSTGRES_SHARED_BUFFERS="512MB"
+ENV DUCKDB_ALLOW_COMMUNITY_EXTENSIONS="true"
+
+# Start PostgreSQL with required extensions preloaded
+# pg_cron and pg_net require shared_preload_libraries
+CMD ["postgres", \
+     "-c", "shared_preload_libraries=timescaledb,age,pg_duckdb,pg_cron,pg_net,pg_documentdb_core,pg_documentdb", \
+     "-c", "shared_buffers=512MB", \
+     "-c", "wal_level=logical", \
+     "-c", "max_wal_senders=10", \
+     "-c", "max_replication_slots=10", \
+     "-c", "cron.database_name=postgres"]
+
+# =============================================================================
+# Extension Installation Order (in database):
+#   1. CREATE EXTENSION timescaledb;        -- Time-series (hypertables, compression)
+#   2. CREATE EXTENSION age;                -- Graph database (Cypher queries)
+#      LOAD 'age';
+#      SET search_path = ag_catalog, public;
+#   3. CREATE EXTENSION pg_duckdb;          -- DuckDB OLAP (v1.1.x, DuckDB 1.4.3)
+#   4. CREATE EXTENSION pgmq;               -- Message queue (SQS-like)
+#   5. CREATE EXTENSION pg_cron;            -- Job scheduler (cron syntax)
+#   6. CREATE EXTENSION pg_net;             -- HTTP client (fetch URLs from SQL)
+#   7. CREATE EXTENSION pg_graphql;         -- GraphQL API
+#   8. CREATE EXTENSION vector;             -- Vector similarity search (pgvector)
+#   9. CREATE EXTENSION system_stats;       -- OS-level system metrics
+#  10. CREATE EXTENSION documentdb_core;    -- BSON data type (DocumentDB core)
+#  11. CREATE EXTENSION documentdb;         -- MongoDB-compatible CRUD API
+#
+# Extension Versions:
+#   - pg_duckdb 1.1.x (DuckDB 1.4.3)
+#   - TimescaleDB 2.25.x
+#   - Apache AGE 1.6.0
+#   - pgmq 1.9.0
+#   - pg_cron 1.6.7
+#   - pg_net 0.20.2
+#   - pg_graphql 1.5.12
+#   - pgvector 0.8.1
+#   - system_stats 3.2
+#   - DocumentDB 0.109-0
+#
+# External Tools (NOT included, run separately):
+#   - PostgREST: REST API server (docker run postgrest/postgrest)
+#   - pg-boss: Node.js job queue library (npm install pg-boss)
+#   - pg_documentdb_gw: MongoDB wire protocol gateway (build separately with pgrx)
+#
+# Build Performance Notes:
+#   - All 8 source-built extensions compile in PARALLEL (BuildKit)
+#   - ccache persists across rebuilds for C extensions
+#   - Cargo registry/git caches persist for pg_graphql Rust builds
+#   - apt caches shared between builder-base and final stage
+#   - DESTDIR pattern avoids installing into builder filesystem
+#   - Typical cold build: ~15 min (was ~40 min sequential)
+#   - Typical warm rebuild (1 ext changed): ~3-5 min
+# =============================================================================

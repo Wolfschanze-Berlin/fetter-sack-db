@@ -1,0 +1,154 @@
+# =============================================================================
+# Clawd Camelot - Docker Compose Configuration
+# =============================================================================
+# Messaging bridge connecting Telegram (and other platforms) to Claude Code
+# AI agents with access to athena-mpc project context.
+#
+# Usage:
+#   Start gateway:  docker compose up clawd-gateway -d
+#   Run onboard:    docker compose run --rm clawd-cli onboard
+#   View logs:      docker compose logs -f clawd-gateway
+#   Stop:           docker compose down
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Clawd.bot Gateway Service
+  # ---------------------------------------------------------------------------
+  clawd-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: clawd-camelot-gateway
+    restart: unless-stopped
+
+    ports:
+      - "${CLAWD_GATEWAY_PORT:-18789}:18789"
+
+    environment:
+      # Gateway configuration
+      - NODE_ENV=production
+      - CLAWD_GATEWAY_PORT=18789
+      - CLAWD_GATEWAY_HOST=0.0.0.0
+
+      # Telegram configuration
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+
+      # Claude/Anthropic API
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # AWS Athena credentials (for query execution)
+      - AWS_ACCESS_KEY=${AWS_ACCESS_KEY:-}
+      - AWS_SECRET_KEY=${AWS_SECRET_KEY:-}
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
+
+      # Athena-specific credentials
+      - ATHENA_ACCESS_KEY=${ATHENA_ACCESS_KEY:-}
+      - ATHENA_ACCESS_KEY_SECRET=${ATHENA_ACCESS_KEY_SECRET:-}
+      - ATHENA_REGION=${ATHENA_REGION:-ap-northeast-1}
+
+      # S3 output bucket for large results
+      - S3_OUTPUT_BUCKET=${S3_OUTPUT_BUCKET:-services-athena-query-output-s3-9707}
+
+    volumes:
+      # Persist Clawd.bot configuration and sessions
+      - clawd-data:/home/node/.clawdbot
+
+      # Persist Claude Code settings
+      - claude-data:/home/node/.claude
+
+      # Mount project root for CLAUDE.md context (writable for Clawd.bot agent files)
+      - ../../:/home/node/workspace:rw
+
+      # Mount .claude folder explicitly for project context (writable for agent state)
+      - ../../.claude:/home/node/workspace/.claude:rw
+
+      # Mount schema documentation (read-only)
+      - ../../db:/home/node/workspace/db:ro
+
+      # Mount scripts for AWS/Athena operations (read-only)
+      - ../../scripts:/home/node/workspace/scripts:ro
+
+      # Mount documentation (read-only)
+      - ../../docs:/home/node/workspace/docs:ro
+
+      # Mount reports directory (writable for query results)
+      - ../../reports:/home/node/workspace/reports:rw
+
+      # Mount config files
+      - ./config:/home/node/config:ro
+
+      # Mount custom agents
+      - ./agents:/home/node/agents:ro
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    labels:
+      - "com.clawd-camelot.description=Telegram to Athena AI Bridge"
+      - "com.clawd-camelot.version=1.0.0"
+
+  # ---------------------------------------------------------------------------
+  # Clawd.bot CLI Service (for onboarding and management)
+  # ---------------------------------------------------------------------------
+  clawd-cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: clawd-camelot-cli
+
+    environment:
+      - NODE_ENV=production
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+    volumes:
+      - clawd-data:/home/node/.clawdbot
+      - claude-data:/home/node/.claude
+      - ../../:/home/node/workspace:ro
+      - ../../.claude:/home/node/workspace/.claude:ro
+      - ../../db:/home/node/workspace/db:ro
+      - ../../scripts:/home/node/workspace/scripts:ro
+      - ../../docs:/home/node/workspace/docs:ro
+      - ../../reports:/home/node/workspace/reports:rw
+      - ./config:/home/node/config:ro
+
+    # Override entrypoint for CLI operations
+    entrypoint: ["clawdbot"]
+
+    # Default command (can be overridden)
+    command: ["--help"]
+
+    profiles:
+      - cli  # Only start when explicitly requested
+
+# =============================================================================
+# Named Volumes
+# =============================================================================
+volumes:
+  # Clawd.bot data (sessions, auth tokens, configuration)
+  clawd-data:
+    driver: local
+
+  # Claude Code data (settings, history)
+  claude-data:
+    driver: local
+
+# =============================================================================
+# Networks (optional - uncomment to use custom network)
+# =============================================================================
+# networks:
+#   clawd-network:
+#     driver: bridge

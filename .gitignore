@@ -1,0 +1,31 @@
+# Environment files (contain secrets)
+.env
+.env.*
+!.env.example
+
+# Docker volumes & build artifacts
+pg_data/
+db/pg/cache/
+
+# Logs
+*.log
+logs/
+
+# DuckDB / Parquet local cache
+*.duckdb
+*.duckdb.wal
+*.parquet
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# OMC state (claude tooling)
+.omc/

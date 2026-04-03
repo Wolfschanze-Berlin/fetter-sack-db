@@ -1,0 +1,24 @@
+# Environment files (contain secrets)
+.env
+*.env.local
+
+# Clawd.bot data (sessions, tokens)
+.clawdbot/
+data/
+
+# Logs
+*.log
+logs/
+
+# Node modules (if any local development)
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
