@@ -1,0 +1,23 @@
+---
+# Hadolint configuration for multi-stage PostgreSQL extension build
+# https://github.com/hadolint/hadolint#configure
+
+ignored:
+  # DL3003: Use WORKDIR to switch to a directory
+  # We use `cd` inside RUN with `&&` chains for multi-stage builds with DESTDIR.
+  # WORKDIR persists across layers — undesirable when building in /tmp dirs.
+  - DL3003
+
+  # DL3008: Pin versions in apt-get install
+  # We use postgresql-server-dev-17 which is already version-pinned to PG17.
+  # Pinning patch versions (e.g., =17.9-1) breaks on upstream updates.
+  - DL3008
+
+  # DL3002: Last USER should not be root
+  # False positive: final stage ends with USER postgres (line ~220).
+  # Builder stages run as root but are discarded.
+  - DL3002
+
+  # SC2046: Quote to prevent word splitting
+  # $(nproc) always returns a single integer. Quoting is unnecessary.
+  - SC2046
