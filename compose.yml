@@ -10,6 +10,8 @@ services:
   # --------------------------------------------------------------------------
   postgres:
     image: ghcr.io/wolfschanze-berlin/fetter-sack-db:latest
+    expose:
+      - "5432"
     environment:
       POSTGRES_DB: athena-mcp
       POSTGRES_USER: postgres
@@ -169,6 +171,8 @@ services:
   # --------------------------------------------------------------------------
   pgbouncer:
     image: edoburu/pgbouncer:latest
+    expose:
+      - "5432"
     volumes:
       - ./docker/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./docker/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
@@ -189,6 +193,8 @@ services:
   # --------------------------------------------------------------------------
   postgrest:
     image: postgrest/postgrest:v12.2.3
+    expose:
+      - "3000"
     environment:
       # ─── Connection ──────────────────────────────────────────────────
       PGRST_DB_URI: postgres://authenticator:authenticator@pgbouncer:5432/athena-mcp
