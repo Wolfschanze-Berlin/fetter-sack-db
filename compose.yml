@@ -9,9 +9,10 @@
 ####################################################################
 
 x-postgres-common: &postgres-common
-  container_name: fetter-sack-db
-  ports:
-    - "46432:5432" # Direct PG (admin, migrations, pg_duckdb). Use 46433 for apps
+  networks:
+    default:
+      aliases:
+        - pg  # stable DNS alias for pgbouncer/postgrest regardless of service name
   environment:
     POSTGRES_DB: athena-mcp
     POSTGRES_USER: postgres
@@ -114,7 +115,6 @@ x-postgres-common: &postgres-common
   volumes:
     - pg_data:/var/lib/postgresql/data
     - ./db/pg/cache:/docker-entrypoint-initdb.d:ro
-    - /mnt/camelot/duckdb:/parquet:ro
   healthcheck:
     test: ["CMD-SHELL", "pg_isready -U postgres -d athena-mcp"]
     interval: 5s
@@ -148,10 +148,17 @@ services:
   postgres-dev:
     <<: *postgres-common
     profiles: [dev]
+    container_name: fetter-sack-db
+    ports:
+      - "46432:5432" # Direct PG (admin, migrations, pg_duckdb)
     build:
       context: ./docker
       dockerfile: Dockerfile.pg-analytics-stack
     image: fetter-sack-db:latest
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./db/pg/cache:/docker-entrypoint-initdb.d:ro
+      - /mnt/camelot/duckdb:/parquet:ro
 
   # --------------------------------------------------------------------------
   # PostgreSQL (prod): pulls pre-built image from GHCR
@@ -168,9 +175,6 @@ services:
   # --------------------------------------------------------------------------
   pgbouncer:
     image: edoburu/pgbouncer:latest
-    container_name: fetter-sack-bouncer
-    ports:
-      - "46434:5432" # Pooled PG connections (apps should connect here)
     volumes:
       - ./docker/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./docker/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
@@ -195,12 +199,9 @@ services:
   # --------------------------------------------------------------------------
   postgrest:
     image: postgrest/postgrest:v12.2.3
-    container_name: fetter-sack-rest
-    ports:
-      - "46433:3000" # REST API
     environment:
       # ─── Connection ──────────────────────────────────────────────────
-      PGRST_DB_URI: postgres://authenticator:authenticator@fetter-sack-bouncer:5432/athena-mcp
+      PGRST_DB_URI: postgres://authenticator:authenticator@pgbouncer:5432/athena-mcp
       PGRST_DB_SCHEMAS: api
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_EXTRA_SEARCH_PATH: public,app,analytics,embeddings,partman
