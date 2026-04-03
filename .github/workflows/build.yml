@@ -1,0 +1,247 @@
+name: Build & Push Container Images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - 'db/pg/cache/**'
+      - 'compose.yml'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - 'db/pg/cache/**'
+      - 'compose.yml'
+  workflow_dispatch:
+    inputs:
+      push_images:
+        description: 'Push images to GHCR'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/wolfschanze-berlin/fetter-sack-db
+
+jobs:
+  # ─── Validate ────────────────────────────────────────────────────────────
+  validate:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose.yml
+        run: docker compose config --quiet
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/Dockerfile.pg-analytics-stack
+          failure-threshold: error
+
+      - name: Check init script order
+        run: |
+          echo "Init script execution order:"
+          ls -1 db/pg/cache/*.sql | sort
+          echo ""
+          echo "Verifying 00-extensions.sql runs first..."
+          FIRST=$(ls -1 db/pg/cache/*.sql | sort | head -1)
+          echo "First script: $FIRST"
+          [[ "$FIRST" == *"00-extensions"* ]] || { echo "FAIL: 00-extensions.sql must run first"; exit 1; }
+
+  # ─── Build PostgreSQL Image ──────────────────────────────────────────────
+  build:
+    name: Build PostgreSQL Image
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' || github.event.inputs.push_images == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile.pg-analytics-stack
+          push: ${{ github.event_name == 'push' || github.event.inputs.push_images == 'true' }}
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Verify image extensions
+        run: |
+          IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
+          echo "Verifying image: $IMAGE"
+          docker run --rm "$IMAGE" test -f /usr/share/postgresql/17/extension/pg_partman.control
+          docker run --rm "$IMAGE" test -f /usr/lib/postgresql/17/lib/age.so
+          docker run --rm "$IMAGE" test -f /usr/lib/postgresql/17/lib/vector.so
+          docker run --rm "$IMAGE" test -f /usr/lib/postgresql/17/lib/pg_hashids.so
+          echo "All extension files verified in image"
+
+  # ─── Integration Test ────────────────────────────────────────────────────
+  integration-test:
+    name: Integration Test
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Restore image from cache
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile.pg-analytics-stack
+          load: true
+          tags: fetter-sack-db:ci
+          cache-from: type=gha
+
+      - name: Start PostgreSQL
+        run: |
+          docker run -d \
+            --name fetter-sack-db-ci \
+            -p 5432:5432 \
+            -e POSTGRES_DB=athena-mcp \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -v ${{ github.workspace }}/db/pg/cache:/docker-entrypoint-initdb.d:ro \
+            --shm-size=2g \
+            --health-cmd "pg_isready -U postgres -d athena-mcp" \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 20 \
+            --health-start-period 60s \
+            fetter-sack-db:ci \
+            postgres \
+            -c shared_preload_libraries='pg_partman_bgw,pg_stat_statements,age,pg_duckdb,pg_cron,pg_net' \
+            -c shared_buffers=256MB \
+            -c cron.database_name=athena-mcp \
+            -c pg_partman_bgw.dbname='athena-mcp'
+
+      - name: Wait for healthy
+        run: |
+          echo "Waiting for PostgreSQL to be healthy..."
+          for i in $(seq 1 60); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' fetter-sack-db-ci 2>/dev/null || echo "starting")
+            if [ "$STATUS" = "healthy" ]; then
+              echo "PostgreSQL is healthy after ${i}s"
+              break
+            fi
+            if [ "$STATUS" = "unhealthy" ]; then
+              echo "FAIL: Container unhealthy"
+              docker logs fetter-sack-db-ci
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Check init scripts ran
+        run: |
+          docker logs fetter-sack-db-ci 2>&1 | grep -c "===" | xargs -I{} echo "Init sections completed: {}"
+          # Check for errors (ignore expected BGW "database does not exist" during init)
+          ERRORS=$(docker logs fetter-sack-db-ci 2>&1 | grep "ERROR" | grep -v "does not exist" | wc -l)
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "FAIL: $ERRORS errors during init"
+            docker logs fetter-sack-db-ci 2>&1 | grep "ERROR" | grep -v "does not exist"
+            exit 1
+          fi
+          echo "No init errors"
+
+      - name: Verify extensions (expect 15)
+        run: |
+          ACTUAL=$(docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -t -c \
+            "SELECT count(*) FROM pg_extension WHERE extname != 'plpgsql';" | xargs)
+          echo "Extensions: $ACTUAL"
+          [ "$ACTUAL" -ge 14 ] || { echo "FAIL: expected >= 14, got $ACTUAL"; exit 1; }
+
+      - name: Test pg_partman
+        run: |
+          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "
+            CREATE TABLE ci_part (id bigint, ts timestamptz not null) PARTITION BY RANGE (ts);
+            SELECT partman_create_daily('public.ci_part', 'ts');
+            INSERT INTO ci_part VALUES (1, now());
+            SELECT count(*) FROM ci_part;
+            DROP TABLE ci_part CASCADE;
+          "
+
+      - name: Test pgvector + indexes
+        run: |
+          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "
+            SELECT create_embedding_table('ci_vec', 384);
+          "
+          INDEXES=$(docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -t -c \
+            "SELECT count(*) FROM pg_indexes WHERE schemaname='embeddings' AND tablename='ci_vec';" | xargs)
+          echo "Vector indexes: $INDEXES"
+          [ "$INDEXES" -ge 7 ] || { echo "FAIL: expected >= 7 indexes"; exit 1; }
+          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "DROP TABLE embeddings.ci_vec CASCADE;"
+
+      - name: Test pgmq
+        run: |
+          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "
+            SELECT mq_send('tasks', '{\"ci\": true}');
+            SELECT msg_id FROM pgmq.read('tasks', 0, 1);
+          "
+
+      - name: Test cache table
+        run: |
+          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "
+            SELECT cache_set('ci', 'key1', '{\"ok\": true}');
+            SELECT cache_get('ci', 'key1');
+            SELECT * FROM cache_size();
+            SELECT cache_del('ci', 'key1');
+          "
+
+      - name: Test PostgREST roles
+        run: |
+          ROLES=$(docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -t -c \
+            "SELECT count(*) FROM pg_roles WHERE rolname IN ('authenticator','anon','webuser');" | xargs)
+          echo "PostgREST roles: $ROLES"
+          [ "$ROLES" -eq 3 ] || { echo "FAIL: expected 3 roles"; exit 1; }
+
+      - name: Test developer views
+        run: |
+          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "
+            SELECT count(*) AS ext FROM extensions;
+            SELECT * FROM db_overview;
+            SELECT * FROM query_stats_summary;
+          "
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f fetter-sack-db-ci 2>/dev/null || true
