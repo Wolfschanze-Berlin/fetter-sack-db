@@ -247,5 +247,9 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+networks:
+  default:
+    driver: bridge
+
 volumes:
   pg_data:
