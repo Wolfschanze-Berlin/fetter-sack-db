@@ -29,5 +29,11 @@ logs/
 Thumbs.db
 desktop.ini
 
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
 # OMC state (claude tooling)
 .omc/
