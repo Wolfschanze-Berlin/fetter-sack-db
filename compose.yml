@@ -144,10 +144,8 @@ services:
   # --------------------------------------------------------------------------
   migrations:
     image: ghcr.io/wolfschanze-berlin/fetter-sack-db:latest
-    entrypoint: []
+    entrypoint: ["bash", "-c"]
     command:
-      - bash
-      - -c
       - |
         until pg_isready -h postgres -U postgres -d athena-mcp; do sleep 1; done
         for f in /migrations/*.sql; do
