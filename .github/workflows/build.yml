@@ -22,6 +22,10 @@ on:
         default: 'false'
         type: boolean
 
+permissions:
+  contents: read
+  packages: write
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ghcr.io/wolfschanze-berlin/fetter-sack-db
@@ -58,9 +62,6 @@ jobs:
     name: Build PostgreSQL Image
     needs: validate
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
 
