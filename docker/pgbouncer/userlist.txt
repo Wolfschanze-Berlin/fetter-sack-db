@@ -1,0 +1,7 @@
+;; PgBouncer userlist
+;; Format: "username" "password"
+;; For scram-sha-256, use empty password and let auth_query handle it
+;; Or use md5/plain passwords here
+
+"postgres" "postgres"
+"authenticator" "authenticator"
