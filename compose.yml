@@ -9,10 +9,6 @@
 ####################################################################
 
 x-postgres-common: &postgres-common
-  networks:
-    default:
-      aliases:
-        - pg  # stable DNS alias for pgbouncer/postgrest regardless of service name
   environment:
     POSTGRES_DB: athena-mcp
     POSTGRES_USER: postgres
@@ -144,8 +140,9 @@ x-postgres-common: &postgres-common
 services:
   # --------------------------------------------------------------------------
   # PostgreSQL (dev): builds image locally from Dockerfile
+  # Service gets alias 'postgres' so pgbouncer resolves it in dev too
   # --------------------------------------------------------------------------
-  postgres-dev:
+  postgres-local:
     <<: *postgres-common
     profiles: [dev]
     container_name: fetter-sack-db
@@ -155,6 +152,10 @@ services:
       context: ./docker
       dockerfile: Dockerfile.pg-analytics-stack
     image: fetter-sack-db:latest
+    networks:
+      default:
+        aliases:
+          - postgres
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./db/pg/cache:/docker-entrypoint-initdb.d:ro
@@ -179,7 +180,7 @@ services:
       - ./docker/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./docker/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
     depends_on:
-      postgres-dev:
+      postgres-local:
         condition: service_healthy
         required: false
       postgres:
