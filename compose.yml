@@ -236,6 +236,12 @@ services:
       # Run NOTIFY pgrst, 'reload schema' after DDL changes
       PGRST_DB_CHANNEL_ENABLED: "true"
       PGRST_DB_CHANNEL: pgrst
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     depends_on:
       pgbouncer:
         condition: service_healthy
