@@ -110,12 +110,20 @@ services:
         SELECT pg_notify('pgrst', 'reload schema');
         EOSQL
         echo "Migrations complete"
+        touch /tmp/migrations_done
+        sleep infinity
     environment:
       PGPASSWORD: postgres
     depends_on:
       postgres:
         condition: service_healthy
-    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/migrations_done"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
 
   postgrest:
     image: postgrest/postgrest:v12.2.3
@@ -147,7 +155,7 @@ services:
       postgres:
         condition: service_healthy
       migrations:
-        condition: service_completed_successfully
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
