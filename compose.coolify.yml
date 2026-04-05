@@ -58,6 +58,26 @@ services:
     shm_size: "20gb"
     restart: unless-stopped
 
+  migrations:
+    image: ghcr.io/wolfschanze-berlin/fetter-sack-db:latest
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        until pg_isready -h postgres -U postgres -d postgres; do sleep 1; done
+        for f in /migrations/*.sql; do
+          echo "Running migration: $$f"
+          psql -h postgres -U postgres -d postgres -f "$$f"
+        done
+        echo "Migrations complete"
+    environment:
+      PGPASSWORD: postgres
+    volumes:
+      - ./db/pg/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   postgrest:
     image: postgrest/postgrest:v12.2.3
     ports:
@@ -81,6 +101,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:
