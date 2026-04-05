@@ -43,7 +43,7 @@ docker compose up -d postgres
 # Or standalone
 docker run -d \
   -p 46432:5432 \
-  -e POSTGRES_DB=athena-mcp \
+  -e POSTGRES_DB=postgres \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
   -v pg_data:/home/postgres/pgdata \
@@ -64,7 +64,7 @@ Or manually:
 
 ```bash
 # Check extensions are available
-docker exec fetter-sack-db psql -U postgres -d athena-mcp -c \
+docker exec fetter-sack-db psql -U postgres -d postgres -c \
   "SELECT name, default_version FROM pg_available_extensions
    WHERE name IN ('pg_partman', 'age', 'pg_duckdb', 'pgmq', 'pg_cron',
                   'pg_net', 'pg_graphql', 'vector', 'system_stats');"
@@ -215,14 +215,14 @@ SELECT pgmq.archive('investigation_tasks', 1);
 ### Configuration
 
 **Environment Variables** (see compose.yml for full list):
-- `POSTGRES_DB=athena-mcp` - Database name
+- `POSTGRES_DB=postgres` - Database name
 - `POSTGRES_USER=postgres` - Superuser name
 - `POSTGRES_PASSWORD=postgres` - Superuser password
 - `POSTGRES_SHARED_PRELOAD_LIBRARIES=pg_partman_bgw,pg_stat_statements,age,pg_duckdb,pg_cron,pg_net`
 
 **pg_partman BGW settings**:
 - `pg_partman_bgw.interval=3600` - Run maintenance every hour (seconds)
-- `pg_partman_bgw.dbname='athena-mcp'` - Target database
+- `pg_partman_bgw.dbname='postgres'` - Target database
 
 **Port**: 46432 (host) -> 5432 (container)
 
@@ -233,7 +233,7 @@ SELECT pgmq.archive('investigation_tasks', 1);
 #### Extensions not available
 
 ```bash
-docker exec fetter-sack-db psql -U postgres -d athena-mcp -c \
+docker exec fetter-sack-db psql -U postgres -d postgres -c \
   "SHOW shared_preload_libraries;"
 # Should show: pg_partman_bgw,age,pg_duckdb,pg_cron,pg_net,...
 ```
