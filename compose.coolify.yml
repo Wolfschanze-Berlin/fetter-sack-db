@@ -64,15 +64,54 @@ services:
     command:
       - |
         until pg_isready -h postgres -U postgres -d postgres; do sleep 1; done
-        for f in /migrations/*.sql; do
-          echo "Running migration: $$f"
-          psql -h postgres -U postgres -d postgres -f "$$f"
-        done
+        echo "Running migrations..."
+        psql -h postgres -U postgres -d postgres <<'EOSQL'
+        -- 000-postgrest-roles.sql (idempotent)
+        DO $$$$ BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticator') THEN
+                CREATE ROLE authenticator LOGIN NOINHERIT PASSWORD 'authenticator';
+                RAISE NOTICE 'Created role: authenticator';
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'anon') THEN
+                CREATE ROLE anon NOLOGIN;
+                RAISE NOTICE 'Created role: anon';
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'webuser') THEN
+                CREATE ROLE webuser NOLOGIN;
+                RAISE NOTICE 'Created role: webuser';
+            END IF;
+        END $$$$;
+        GRANT anon TO authenticator;
+        GRANT webuser TO authenticator;
+        CREATE SCHEMA IF NOT EXISTS api;
+        CREATE SCHEMA IF NOT EXISTS app;
+        GRANT USAGE ON SCHEMA api TO anon, webuser;
+        GRANT USAGE ON SCHEMA app TO anon, webuser;
+        GRANT USAGE ON SCHEMA public TO anon, webuser;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT SELECT ON TABLES TO anon;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO webuser;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT EXECUTE ON FUNCTIONS TO anon, webuser;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT USAGE ON SEQUENCES TO webuser;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO anon;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO webuser;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT USAGE ON SEQUENCES TO webuser;
+
+        -- 001-api-health.sql (idempotent)
+        CREATE OR REPLACE FUNCTION api.health()
+        RETURNS json LANGUAGE sql STABLE SECURITY DEFINER AS $$$$
+            SELECT json_build_object(
+                'status', 'ok',
+                'version', current_setting('server_version'),
+                'timestamp', now(),
+                'database', current_database()
+            );
+        $$$$;
+        GRANT EXECUTE ON FUNCTION api.health() TO anon, webuser;
+        SELECT pg_notify('pgrst', 'reload schema');
+        EOSQL
         echo "Migrations complete"
     environment:
       PGPASSWORD: postgres
-    volumes:
-      - ./db/pg/migrations:/migrations:ro
     depends_on:
       postgres:
         condition: service_healthy
