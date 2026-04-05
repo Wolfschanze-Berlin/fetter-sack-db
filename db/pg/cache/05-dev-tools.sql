@@ -359,9 +359,9 @@ COMMENT ON FUNCTION public.kill_query IS
 -- Performance: set statement_timeout for dev safety (prevent runaway queries)
 -- 5 minutes is generous for development; reduce for production
 -- ---------------------------------------------------------------------------
-ALTER DATABASE "athena-mcp" SET statement_timeout = '5min';
-ALTER DATABASE "athena-mcp" SET lock_timeout = '30s';
-ALTER DATABASE "athena-mcp" SET idle_in_transaction_session_timeout = '10min';
+ALTER DATABASE postgres SET statement_timeout = '5min';
+ALTER DATABASE postgres SET lock_timeout = '30s';
+ALTER DATABASE postgres SET idle_in_transaction_session_timeout = '10min';
 
 \echo '  timeout safety nets configured (statement=5m, lock=30s, idle_txn=10m)'
 

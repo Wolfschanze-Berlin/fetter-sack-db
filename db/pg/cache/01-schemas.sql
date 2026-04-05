@@ -25,7 +25,7 @@ ALTER ROLE postgres SET search_path = public, app, analytics, partman, ag_catalo
 
 -- Pre-load AGE in every new session for this database
 -- This avoids the need to manually run LOAD 'age' each time
-ALTER DATABASE "athena-mcp" SET session_preload_libraries = 'age';
+ALTER DATABASE postgres SET session_preload_libraries = 'age';
 \echo '  age auto-loaded via session_preload_libraries'
 
 \echo '=== Schemas ready ==='
