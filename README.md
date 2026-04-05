@@ -86,10 +86,10 @@ docker compose up -d
 docker ps --filter "name=fetter-sack"
 
 # Connect via PgBouncer (recommended for apps)
-psql postgres://postgres:postgres@localhost:46434/athena-mcp
+psql postgres://postgres:postgres@localhost:46434/postgres
 
 # Connect directly (admin/migrations)
-psql postgres://postgres:postgres@localhost:46432/athena-mcp
+psql postgres://postgres:postgres@localhost:46432/postgres
 
 # REST API
 curl http://localhost:46433/
