@@ -141,12 +141,12 @@ jobs:
           docker run -d \
             --name fetter-sack-db-ci \
             -p 5432:5432 \
-            -e POSTGRES_DB=athena-mcp \
+            -e POSTGRES_DB=postgres \
             -e POSTGRES_USER=postgres \
             -e POSTGRES_PASSWORD=postgres \
             -v ${{ github.workspace }}/db/pg/cache:/docker-entrypoint-initdb.d:ro \
             --shm-size=2g \
-            --health-cmd "pg_isready -U postgres -d athena-mcp" \
+            --health-cmd "pg_isready -U postgres -d postgres" \
             --health-interval 5s \
             --health-timeout 5s \
             --health-retries 20 \
@@ -155,8 +155,8 @@ jobs:
             postgres \
             -c shared_preload_libraries='pg_partman_bgw,pg_stat_statements,age,pg_duckdb,pg_cron,pg_net' \
             -c shared_buffers=256MB \
-            -c cron.database_name=athena-mcp \
-            -c pg_partman_bgw.dbname='athena-mcp'
+            -c cron.database_name=postgres \
+            -c pg_partman_bgw.dbname='postgres'
 
       - name: Wait for healthy
         run: |
@@ -189,14 +189,14 @@ jobs:
 
       - name: Verify extensions (expect 15)
         run: |
-          ACTUAL=$(docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -t -c \
+          ACTUAL=$(docker exec fetter-sack-db-ci psql -U postgres -d postgres -t -c \
             "SELECT count(*) FROM pg_extension WHERE extname != 'plpgsql';" | xargs)
           echo "Extensions: $ACTUAL"
           [ "$ACTUAL" -ge 14 ] || { echo "FAIL: expected >= 14, got $ACTUAL"; exit 1; }
 
       - name: Test pg_partman
         run: |
-          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "
+          docker exec fetter-sack-db-ci psql -U postgres -d postgres -c "
             CREATE TABLE ci_part (id bigint, ts timestamptz not null) PARTITION BY RANGE (ts);
             SELECT partman_create_daily('public.ci_part', 'ts');
             INSERT INTO ci_part VALUES (1, now());
@@ -206,25 +206,25 @@ jobs:
 
       - name: Test pgvector + indexes
         run: |
-          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "
+          docker exec fetter-sack-db-ci psql -U postgres -d postgres -c "
             SELECT create_embedding_table('ci_vec', 384);
           "
-          INDEXES=$(docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -t -c \
+          INDEXES=$(docker exec fetter-sack-db-ci psql -U postgres -d postgres -t -c \
             "SELECT count(*) FROM pg_indexes WHERE schemaname='embeddings' AND tablename='ci_vec';" | xargs)
           echo "Vector indexes: $INDEXES"
           [ "$INDEXES" -ge 7 ] || { echo "FAIL: expected >= 7 indexes"; exit 1; }
-          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "DROP TABLE embeddings.ci_vec CASCADE;"
+          docker exec fetter-sack-db-ci psql -U postgres -d postgres -c "DROP TABLE embeddings.ci_vec CASCADE;"
 
       - name: Test pgmq
         run: |
-          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "
+          docker exec fetter-sack-db-ci psql -U postgres -d postgres -c "
             SELECT mq_send('tasks', '{\"ci\": true}');
             SELECT msg_id FROM pgmq.read('tasks', 0, 1);
           "
 
       - name: Test cache table
         run: |
-          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "
+          docker exec fetter-sack-db-ci psql -U postgres -d postgres -c "
             SELECT cache_set('ci', 'key1', '{\"ok\": true}');
             SELECT cache_get('ci', 'key1');
             SELECT * FROM cache_size();
@@ -233,14 +233,14 @@ jobs:
 
       - name: Test PostgREST roles
         run: |
-          ROLES=$(docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -t -c \
+          ROLES=$(docker exec fetter-sack-db-ci psql -U postgres -d postgres -t -c \
             "SELECT count(*) FROM pg_roles WHERE rolname IN ('authenticator','anon','webuser');" | xargs)
           echo "PostgREST roles: $ROLES"
           [ "$ROLES" -eq 3 ] || { echo "FAIL: expected 3 roles"; exit 1; }
 
       - name: Test developer views
         run: |
-          docker exec fetter-sack-db-ci psql -U postgres -d athena-mcp -c "
+          docker exec fetter-sack-db-ci psql -U postgres -d postgres -c "
             SELECT count(*) AS ext FROM extensions;
             SELECT * FROM db_overview;
             SELECT * FROM query_stats_summary;

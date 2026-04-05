@@ -13,7 +13,7 @@ services:
     expose:
       - "5432"
     environment:
-      POSTGRES_DB: athena-mcp
+      POSTGRES_DB: postgres
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       PGDATA: /var/lib/postgresql/data
@@ -70,7 +70,7 @@ services:
       DUCKDB_THREADS: "12" # DuckDB parallelism (increased)
       # pg_partman BGW
       PG_PARTMAN_BGW_INTERVAL: "3600" # Run maintenance every hour
-      PG_PARTMAN_BGW_DBNAME: "athena-mcp" # Database for partition maintenance
+      PG_PARTMAN_BGW_DBNAME: "postgres" # Database for partition maintenance
       # AGE (Graph)
       AGE_ENABLE_CYPHER: "true"
     # PostgreSQL command with runtime config (65GB optimized)
@@ -102,7 +102,7 @@ services:
       -c commit_siblings=5
       -c synchronous_commit=off
       -c pg_partman_bgw.interval=3600
-      -c pg_partman_bgw.dbname='athena-mcp'
+      -c pg_partman_bgw.dbname='postgres'
       -c duckdb.memory_limit='24GB'
       -c duckdb.threads=12
       -c log_min_duration_statement=1000
@@ -110,12 +110,12 @@ services:
       -c log_lock_waits=on
       -c track_io_timing=on
       -c track_functions=all
-      -c cron.database_name=athena-mcp
+      -c cron.database_name=postgres
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./db/pg/cache:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d athena-mcp"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -149,10 +149,10 @@ services:
     entrypoint: ["bash", "-c"]
     command:
       - |
-        until pg_isready -h postgres -U postgres -d athena-mcp; do sleep 1; done
+        until pg_isready -h postgres -U postgres -d postgres; do sleep 1; done
         for f in /migrations/*.sql; do
           echo "Running migration: $$f"
-          psql -h postgres -U postgres -d athena-mcp -f "$$f"
+          psql -h postgres -U postgres -d postgres -f "$$f"
         done
         echo "Migrations complete"
     environment:
@@ -197,7 +197,7 @@ services:
       - "3000"
     environment:
       # ─── Connection ──────────────────────────────────────────────────
-      PGRST_DB_URI: postgres://authenticator:authenticator@pgbouncer:5432/athena-mcp
+      PGRST_DB_URI: postgres://authenticator:authenticator@pgbouncer:5432/postgres
       PGRST_DB_SCHEMAS: api
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_EXTRA_SEARCH_PATH: public,app,analytics,embeddings,partman

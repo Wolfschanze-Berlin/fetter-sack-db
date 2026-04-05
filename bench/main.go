@@ -641,8 +641,8 @@ func printReport(report Report) {
 
 func main() {
 	cfg := Config{}
-	flag.StringVar(&cfg.DirectDSN, "direct", "postgres://postgres:postgres@localhost:46432/athena-mcp", "Direct PostgreSQL DSN")
-	flag.StringVar(&cfg.PooledDSN, "pooled", "postgres://postgres:postgres@localhost:46434/athena-mcp", "PgBouncer pooled DSN")
+	flag.StringVar(&cfg.DirectDSN, "direct", "postgres://postgres:postgres@localhost:46432/postgres", "Direct PostgreSQL DSN")
+	flag.StringVar(&cfg.PooledDSN, "pooled", "postgres://postgres:postgres@localhost:46434/postgres", "PgBouncer pooled DSN")
 	flag.StringVar(&cfg.RestURL, "rest", "http://localhost:46433", "PostgREST URL")
 	flag.IntVar(&cfg.Concurrency, "c", 10, "Concurrency (goroutines per test)")
 	dur := flag.String("d", "5s", "Duration per benchmark")

@@ -28,11 +28,11 @@ ALTER ROLE postgres SET search_path = public, app, analytics, embeddings, partma
 
 -- HNSW search quality: higher ef_search = better recall, slower queries
 -- 40 (default) -> 100 (production) -> 200 (high-recall RAG)
-ALTER DATABASE "athena-mcp" SET hnsw.ef_search = 100;
+ALTER DATABASE postgres SET hnsw.ef_search = 100;
 
 -- IVFFlat probe count: higher = better recall on IVFFlat indexes
 -- Only matters if you use IVFFlat (large tables, memory-constrained)
-ALTER DATABASE "athena-mcp" SET ivfflat.probes = 10;
+ALTER DATABASE postgres SET ivfflat.probes = 10;
 
 -- Increase maintenance_work_mem for index builds (session-level override)
 -- Larger = faster HNSW/IVFFlat builds. 2GB is good for million-row tables.

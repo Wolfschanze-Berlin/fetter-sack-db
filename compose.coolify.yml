@@ -4,7 +4,7 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_DB: athena-mcp
+      POSTGRES_DB: postgres
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       PGDATA: /var/lib/postgresql/data
@@ -38,7 +38,7 @@ services:
       -c commit_siblings=5
       -c synchronous_commit=off
       -c pg_partman_bgw.interval=3600
-      -c pg_partman_bgw.dbname='athena-mcp'
+      -c pg_partman_bgw.dbname='postgres'
       -c duckdb.memory_limit='24GB'
       -c duckdb.threads=12
       -c log_min_duration_statement=1000
@@ -46,11 +46,11 @@ services:
       -c log_lock_waits=on
       -c track_io_timing=on
       -c track_functions=all
-      -c cron.database_name=athena-mcp
+      -c cron.database_name=postgres
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d athena-mcp"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -63,7 +63,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      PGRST_DB_URI: "postgres://authenticator:authenticator@postgres:5432/athena-mcp"
+      PGRST_DB_URI: "postgres://authenticator:authenticator@postgres:5432/postgres"
       PGRST_DB_SCHEMAS: api
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_EXTRA_SEARCH_PATH: "public,app,analytics,embeddings,partman"

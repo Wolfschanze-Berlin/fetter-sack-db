@@ -6,7 +6,7 @@
 set -e
 
 CONTAINER="fetter-sack-db"
-DB="athena-mcp"
+DB="postgres"
 USER="postgres"
 
 psql_cmd() {
